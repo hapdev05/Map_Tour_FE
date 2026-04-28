@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   distanceKm,
@@ -148,12 +148,14 @@ export default function TravelItineraryDashboard() {
     return generateItineraryOptions(keys, hourlyAll, origin, overallScores);
   }, [orderedDistricts, hourlyAll, userPos, overallScores]);
 
-  /* Auto-expand the first option */
+  /* Auto-expand the first option — only on initial load */
+  const hasAutoExpanded = useRef(false);
   useEffect(() => {
-    if (options.length > 0 && expandedOption === null) {
+    if (options.length > 0 && !hasAutoExpanded.current) {
       setExpandedOption(options[0].id);
+      hasAutoExpanded.current = true;
     }
-  }, [options, expandedOption]);
+  }, [options]);
 
   /* ── Render ── */
   return (
