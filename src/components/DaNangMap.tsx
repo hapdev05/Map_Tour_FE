@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   DA_NANG_SPOTS,
   CATEGORY_META,
@@ -35,6 +36,14 @@ export default function DaNangMap() {
     duration: string;
   } | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
+
+  // Virtual spot from URL params (e.g. ?directTo=lat,lng&name=...)
+  const searchParams = useSearchParams();
+  const [pendingDirectTo, setPendingDirectTo] = useState<{
+    lat: number;
+    lng: number;
+    name: string;
+  } | null>(null);
 
   const filtered = DA_NANG_SPOTS.filter((s) => {
     const matchCat = activeCategory === "all" || s.category === activeCategory;
@@ -234,46 +243,18 @@ export default function DaNangMap() {
     setRouteInfo(null);
   }
 
-  // Decode Google Maps encoded polyline
-  function decodePolyline(encoded: string): [number, number][] {
-    const points: [number, number][] = [];
-    let idx = 0;
-    let lat = 0;
-    let lng = 0;
-    while (idx < encoded.length) {
-      let shift = 0;
-      let result = 0;
-      let byte: number;
-      do {
-        byte = encoded.charCodeAt(idx++) - 63;
-        result |= (byte & 0x1f) << shift;
-        shift += 5;
-      } while (byte >= 0x20);
-      lat += result & 1 ? ~(result >> 1) : result >> 1;
-
-      shift = 0;
-      result = 0;
-      do {
-        byte = encoded.charCodeAt(idx++) - 63;
-        result |= (byte & 0x1f) << shift;
-        shift += 5;
-      } while (byte >= 0x20);
-      lng += result & 1 ? ~(result >> 1) : result >> 1;
-
-      points.push([lat / 1e5, lng / 1e5]);
-    }
-    return points;
-  }
-
-  async function getDirections(spot: TouristSpot) {
-    if (!userPos || !leafletMapRef.current) return;
+  const getDirectionsTo = useCallback(async (
+    dest: { lat: number; lng: number },
+    from: { lat: number; lng: number },
+  ) => {
+    if (!leafletMapRef.current) return;
     setRouteLoading(true);
     clearRoute();
 
     try {
       const url =
         `https://router.project-osrm.org/route/v1/driving/` +
-        `${userPos.lng},${userPos.lat};${spot.lng},${spot.lat}` +
+        `${from.lng},${from.lat};${dest.lng},${dest.lat}` +
         `?overview=full&geometries=geojson`;
 
       const res = await fetch(url);
@@ -318,6 +299,93 @@ export default function DaNangMap() {
     } finally {
       setRouteLoading(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-request GPS on first load
+  useEffect(() => {
+    locateMe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Read ?directTo=lat,lng&name=... from URL on mount
+  useEffect(() => {
+    const raw = searchParams.get("directTo");
+    const name = searchParams.get("name") ?? "Điểm đến";
+    if (!raw) return;
+    const [latStr, lngStr] = raw.split(",");
+    const lat = parseFloat(latStr);
+    const lng = parseFloat(lngStr);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      setPendingDirectTo({ lat, lng, name });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Once GPS is ready AND we have a pending destination → fly + get directions
+  useEffect(() => {
+    if (!pendingDirectTo || !userPos || !isLoaded) return;
+    const dest = pendingDirectTo;
+
+    // Create a virtual TouristSpot-like selected state so the info card shows
+    const virtualSpot = {
+      id: "pending-direct",
+      name: dest.name,
+      description: `Điểm đến từ lịch trình`,
+      lat: dest.lat,
+      lng: dest.lng,
+      category: "beach" as const,
+      emoji: "📍",
+      color: "#4285F4",
+    };
+    setSelected(virtualSpot);
+    leafletMapRef.current?.flyTo([dest.lat, dest.lng], 15, {
+      animate: true,
+      duration: 1.2,
+    });
+
+    // Trigger the actual routing
+    void getDirectionsTo(dest, userPos);
+
+    // Clear the pending target so it doesn't re-fire
+    setPendingDirectTo(null);
+  }, [pendingDirectTo, userPos, isLoaded, getDirectionsTo]);
+
+
+  // Decode Google Maps encoded polyline
+  function decodePolyline(encoded: string): [number, number][] {
+    const points: [number, number][] = [];
+    let idx = 0;
+    let lat = 0;
+    let lng = 0;
+    while (idx < encoded.length) {
+      let shift = 0;
+      let result = 0;
+      let byte: number;
+      do {
+        byte = encoded.charCodeAt(idx++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      lat += result & 1 ? ~(result >> 1) : result >> 1;
+
+      shift = 0;
+      result = 0;
+      do {
+        byte = encoded.charCodeAt(idx++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      lng += result & 1 ? ~(result >> 1) : result >> 1;
+
+      points.push([lat / 1e5, lng / 1e5]);
+    }
+    return points;
+  }
+
+  async function getDirections(spot: TouristSpot) {
+    if (!userPos) return;
+    await getDirectionsTo(spot, userPos);
   }
 
   function flyTo(spot: TouristSpot) {
@@ -343,7 +411,7 @@ export default function DaNangMap() {
   ][];
 
   return (
-    <section className="relative w-full bg-slate-950 py-12 px-4">
+    <section className="relative w-full bg-slate-100 py-12 px-4 dark:bg-slate-950">
       <style>{`
         @import url('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
         @keyframes pulse-ring {
@@ -357,36 +425,55 @@ export default function DaNangMap() {
           100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); }
         }
         .leaflet-tooltip-custom {
-          background: rgba(15,23,42,0.95) !important;
-          border: 1px solid rgba(255,255,255,0.15) !important;
-          color: #f1f5f9 !important;
+          background: rgba(255,255,255,0.96) !important;
+          border: 1px solid rgba(15,23,42,0.12) !important;
+          color: #0f172a !important;
           font-size: 12px !important;
           font-weight: 600 !important;
           padding: 4px 10px !important;
           border-radius: 8px !important;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important;
           white-space: nowrap !important;
         }
-        .leaflet-tooltip-custom::before { border-top-color: rgba(255,255,255,0.15) !important; }
-        .leaflet-control-zoom { border: none !important; box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important; }
-        .leaflet-control-zoom a { background: rgba(15,23,42,0.9) !important; color: #94a3b8 !important; border-color: rgba(255,255,255,0.1) !important; }
-        .leaflet-control-zoom a:hover { background: rgba(30,41,59,0.95) !important; color: #f1f5f9 !important; }
-        .leaflet-control-attribution { background: rgba(15,23,42,0.7) !important; color: #64748b !important; font-size: 10px !important; }
-        .leaflet-control-attribution a { color: #94a3b8 !important; }
+        .leaflet-tooltip-custom::before { border-top-color: rgba(15,23,42,0.12) !important; }
+        .dark .leaflet-tooltip-custom {
+          background: rgba(15,23,42,0.95) !important;
+          border: 1px solid rgba(255,255,255,0.15) !important;
+          color: #f1f5f9 !important;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
+        }
+        .dark .leaflet-tooltip-custom::before { border-top-color: rgba(255,255,255,0.15) !important; }
+        .leaflet-control-zoom { border: none !important; box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important; }
+        .leaflet-control-zoom a {
+          background: rgba(255,255,255,0.95) !important;
+          color: #475569 !important;
+          border-color: rgba(15,23,42,0.1) !important;
+        }
+        .leaflet-control-zoom a:hover {
+          background: #f1f5f9 !important;
+          color: #0f172a !important;
+        }
+        .dark .leaflet-control-zoom { box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important; }
+        .dark .leaflet-control-zoom a { background: rgba(15,23,42,0.9) !important; color: #94a3b8 !important; border-color: rgba(255,255,255,0.1) !important; }
+        .dark .leaflet-control-zoom a:hover { background: rgba(30,41,59,0.95) !important; color: #f1f5f9 !important; }
+        .leaflet-control-attribution { background: rgba(255,255,255,0.85) !important; color: #64748b !important; font-size: 10px !important; }
+        .leaflet-control-attribution a { color: #475569 !important; }
+        .dark .leaflet-control-attribution { background: rgba(15,23,42,0.7) !important; color: #64748b !important; }
+        .dark .leaflet-control-attribution a { color: #94a3b8 !important; }
       `}</style>
 
       {/* Header */}
       <div className="max-w-7xl mx-auto mb-6">
         <div className="flex items-center gap-3 mb-1">
           <span className="text-2xl">🗺️</span>
-          <h2 className="text-3xl font-bold text-white">
+          <h2 className="text-3xl font-bold text-slate-900 dark:text-white">
             Địa điểm du lịch Đà Nẵng
           </h2>
-          <span className="ml-auto text-white/30 text-sm">
+          <span className="ml-auto text-sm text-slate-400 dark:text-white/30">
             {DA_NANG_SPOTS.length} địa điểm
           </span>
         </div>
-        <p className="text-white/40 text-sm ml-9">
+        <p className="ml-9 text-sm text-slate-500 dark:text-white/40">
           Khám phá địa điểm nổi bật tại Đà Nẵng
         </p>
 
@@ -394,10 +481,10 @@ export default function DaNangMap() {
         <div className="flex flex-wrap gap-2 mt-4 ml-9">
           <button
             onClick={() => setActiveCategory("all")}
-            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+            className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-all ${
               activeCategory === "all"
-                ? "bg-white text-slate-900 border-white"
-                : "bg-white/5 text-white/60 border-white/10 hover:bg-white/10"
+                ? "border-slate-900 bg-slate-900 text-white dark:border-white dark:bg-white dark:text-slate-900"
+                : "border-slate-200 bg-white/80 text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-white/60 dark:hover:bg-white/10"
             }`}
           >
             🌏 Tất cả ({DA_NANG_SPOTS.length})
@@ -410,10 +497,10 @@ export default function DaNangMap() {
               <button
                 key={cat}
                 onClick={() => setActiveCategory(cat)}
-                className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-all ${
                   activeCategory === cat
                     ? "border-transparent text-white"
-                    : "bg-white/5 text-white/60 border-white/10 hover:bg-white/10"
+                    : "border-slate-200 bg-white/80 text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-white/60 dark:hover:bg-white/10"
                 }`}
                 style={
                   activeCategory === cat
@@ -433,7 +520,7 @@ export default function DaNangMap() {
         <div className="lg:w-64 shrink-0 flex flex-col gap-2">
           {/* Search */}
           <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 text-sm">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 dark:text-white/30">
               🔍
             </span>
             <input
@@ -441,7 +528,7 @@ export default function DaNangMap() {
               placeholder="Tìm địa điểm..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-3 py-2.5 text-white text-sm placeholder-white/30 outline-none focus:border-sky-500/50 focus:bg-white/8 transition-all"
+              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-8 pr-3 text-sm text-slate-800 placeholder-slate-400 outline-none transition-all focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/30 dark:border-white/10 dark:bg-white/5 dark:text-white dark:placeholder-white/30 dark:focus:bg-white/8"
             />
           </div>
 
@@ -449,7 +536,7 @@ export default function DaNangMap() {
           <div className="flex gap-2">
             <button
               onClick={resetView}
-              className="flex-1 text-left px-3 py-2.5 rounded-xl bg-sky-500/15 border border-sky-500/25 text-sky-300 text-xs font-semibold hover:bg-sky-500/25 transition-all flex items-center gap-2"
+              className="flex flex-1 items-center gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2.5 text-left text-xs font-semibold text-sky-700 transition-all hover:bg-sky-100 dark:border-sky-500/25 dark:bg-sky-500/15 dark:text-sky-300 dark:hover:bg-sky-500/25"
             >
               <span>📍</span> Trung tâm
             </button>
@@ -481,19 +568,10 @@ export default function DaNangMap() {
             </button>
           </div>
 
-          {/* GPS info */}
-          {userPos && gpsStatus === "granted" && (
-            <div className="px-3 py-2 rounded-xl bg-blue-500/10 border border-blue-500/20">
-              <p className="text-blue-300 text-[10px] font-medium">
-                📍 {userPos.lat.toFixed(4)}, {userPos.lng.toFixed(4)}
-              </p>
-            </div>
-          )}
-
           {/* Spot list */}
           <div className="flex flex-col gap-1.5 max-h-[460px] overflow-y-auto pr-0.5">
             {filtered.length === 0 && (
-              <p className="text-white/30 text-xs text-center py-6">
+              <p className="py-6 text-center text-xs text-slate-400 dark:text-white/30">
                 Không tìm thấy địa điểm
               </p>
             )}
@@ -501,16 +579,16 @@ export default function DaNangMap() {
               <button
                 key={spot.id}
                 onClick={() => flyTo(spot)}
-                className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${
+                className={`w-full rounded-xl border px-3 py-2.5 text-left transition-all ${
                   selected?.id === spot.id
-                    ? "bg-white/12 border-white/30 scale-[1.01]"
-                    : "bg-white/4 border-white/8 hover:bg-white/10 hover:border-white/20"
+                    ? "scale-[1.01] border-sky-300 bg-sky-50 dark:border-white/30 dark:bg-white/12"
+                    : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 dark:border-white/8 dark:bg-white/4 dark:hover:border-white/20 dark:hover:bg-white/10"
                 }`}
               >
                 <div className="flex items-center gap-2.5">
                   <span className="text-base shrink-0">{spot.emoji}</span>
                   <div className="min-w-0">
-                    <p className="text-white text-xs font-semibold truncate leading-tight">
+                    <p className="truncate text-xs font-semibold leading-tight text-slate-800 dark:text-white">
                       {spot.name}
                     </p>
                     <span
@@ -528,14 +606,14 @@ export default function DaNangMap() {
 
         {/* Map */}
         <div
-          className="relative flex-1 rounded-2xl overflow-hidden border border-white/10 shadow-2xl"
+          className="relative flex-1 overflow-hidden rounded-2xl border border-slate-200 shadow-xl dark:border-white/10 dark:shadow-2xl"
           style={{ height: 580 }}
         >
           {!isLoaded && (
-            <div className="absolute inset-0 bg-slate-900 flex items-center justify-center z-10">
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-white dark:bg-slate-900">
               <div className="flex flex-col items-center gap-3">
-                <div className="w-10 h-10 border-2 border-sky-500 border-t-transparent rounded-full animate-spin" />
-                <p className="text-white/50 text-sm">Đang tải bản đồ...</p>
+                <div className="h-10 w-10 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
+                <p className="text-sm text-slate-500 dark:text-white/50">Đang tải bản đồ...</p>
               </div>
             </div>
           )}
@@ -545,19 +623,16 @@ export default function DaNangMap() {
           {/* Info card */}
           {selected && (
             <div className="absolute bottom-4 left-4 right-16 z-500">
-              <div
-                className="rounded-xl px-4 py-3 border border-white/10 backdrop-blur-md shadow-2xl"
-                style={{ background: "rgba(15,23,42,0.92)" }}
-              >
+              <div className="rounded-xl border border-slate-200/90 bg-white/95 px-4 py-3 shadow-2xl backdrop-blur-md dark:border-white/10 dark:bg-slate-900/92">
                 <div className="flex items-start gap-3">
-                  <span className="text-xl mt-0.5 shrink-0">
+                  <span className="mt-0.5 shrink-0 text-xl">
                     {selected.emoji}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-white font-bold text-sm">
+                    <p className="text-sm font-bold text-slate-900 dark:text-white">
                       {selected.name}
                     </p>
-                    <p className="text-white/55 text-xs mt-0.5 leading-relaxed">
+                    <p className="mt-0.5 text-xs leading-relaxed text-slate-600 dark:text-white/55">
                       {selected.description}
                     </p>
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
@@ -575,10 +650,10 @@ export default function DaNangMap() {
                       {/* Route info */}
                       {routeInfo && (
                         <>
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300">
+                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-800 dark:bg-blue-500/20 dark:text-blue-300">
                             🚗 {routeInfo.distance}
                           </span>
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-300">
                             ⏱ {routeInfo.duration}
                           </span>
                         </>
@@ -608,7 +683,7 @@ export default function DaNangMap() {
                 {routeInfo && (
                   <button
                     onClick={clearRoute}
-                    className="mt-2 text-[10px] text-white/40 hover:text-white/70 transition-colors"
+                    className="mt-2 text-[10px] text-slate-400 transition-colors hover:text-slate-600 dark:text-white/40 dark:hover:text-white/70"
                   >
                     ✕ Xóa đường đi
                   </button>
